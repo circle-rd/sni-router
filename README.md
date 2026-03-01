@@ -98,6 +98,32 @@ Each `TCP_ROUTE_N` creates a dedicated HAProxy frontend on `listen_port`. No SNI
 
 When enabled, HAProxy prepends a PROXY protocol v2 header carrying the real client IP to every forwarded connection. Your backend must be configured to accept it.
 
+### Health checks
+
+By default every backend is **TCP-checked** every 2 seconds (`check inter 2s fall 3 rise 2`). This detects whether the port is open and automatically removes/restores backends during redeployments.
+
+For deeper **application-level** verification you can point HAProxy at an HTTPS health-check endpoint per backend. HAProxy will open its own TLS connection (without certificate verification) and send an HTTP `GET` request.
+
+| Variable             | Required | Default | Description                                                |
+| -------------------- | -------- | ------- | ---------------------------------------------------------- |
+| `SNI_HEALTH_N`       | No       | _(TCP)_ | HTTPS health-check path for `SNI_ROUTE_N` (e.g. `/health`) |
+| `SNI_DEFAULT_HEALTH` | No       | _(TCP)_ | HTTPS health-check path for the `SNI_DEFAULT` backend      |
+| `TCP_HEALTH_N`       | No       | _(TCP)_ | HTTPS health-check path for `TCP_ROUTE_N` (e.g. `/health`) |
+
+When a `*_HEALTH_*` variable is **not set**, the corresponding backend keeps a plain TCP connect check.
+
+**Example** — enable an HTTPS health check for the first SNI route:
+
+```yaml
+environment:
+  SNI_ROUTE_1: "app.example.com:192.168.1.10:443"
+  SNI_HEALTH_1: "/api/health" # GET https://app.example.com/api/health
+  SNI_ROUTE_2: "api.example.com:192.168.1.20:443"
+  # SNI_HEALTH_2 not set → plain TCP check
+  SNI_DEFAULT: "192.168.1.10:443"
+  SNI_DEFAULT_HEALTH: "/health"
+```
+
 **Example — Traefik:**
 
 ```yaml

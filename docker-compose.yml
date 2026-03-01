@@ -26,8 +26,15 @@ services:
       SNI_ROUTE_2: "app2.example.com:192.168.1.20:443"
       SNI_ROUTE_3: "*.staging.example.com:192.168.1.30:443"
 
+      # Optional HTTPS health-check paths per SNI route.
+      # When set, HAProxy sends an HTTPS GET to that path (TLS, no cert
+      # verification) instead of a plain TCP connect check.
+      # SNI_HEALTH_1: "/health"
+      # SNI_HEALTH_2: "/api/health"
+
       # Catch-all when no SNI rule matches.
       SNI_DEFAULT: "192.168.1.10:443"
+      # SNI_DEFAULT_HEALTH: "/health"
 
       # ---------------------------------------------------------------
       # Plain TCP routing — each rule gets its own listen port.
@@ -36,6 +43,10 @@ services:
       # ---------------------------------------------------------------
       # TCP_ROUTE_1: "5432:192.168.1.40:5432"
       # TCP_ROUTE_2: "1883:192.168.1.50:1883"
+
+      # Optional TCP health-check path (HTTPS GET, no cert verify).
+      # TCP_HEALTH_1: "/health"
+      # TCP_HEALTH_2: "/health"
 
       # ---------------------------------------------------------------
       # PROXY protocol v2 — forwards the real client IP to backends

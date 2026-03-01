@@ -9,8 +9,15 @@
 #  SNI_LISTEN_PORT=443           Port to listen on for TLS/SNI routing (default: 443)
 #  SNI_ROUTE_N=hostname:ip:port  TLS SNI routing rules, N = 1, 2, 3 …
 #                                  Wildcard: *.example.com matches any subdomain
+#  SNI_HEALTH_N=/path            Optional HTTPS health-check path for SNI_ROUTE_N
+#                                  When set, HAProxy performs an HTTPS GET on this
+#                                  path (TLS, no cert verification) instead of a
+#                                  plain TCP connect check. The Host header is set
+#                                  to the SNI hostname. Example: /health
 #  SNI_DEFAULT=ip:port           Default backend when no SNI rule matches (REQUIRED)
+#  SNI_DEFAULT_HEALTH=/path      Optional HTTPS health-check path for SNI_DEFAULT
 #  TCP_ROUTE_N=lport:ip:dport    Plain TCP port-based routing rules, N = 1, 2, 3 …
+#  TCP_HEALTH_N=/path            Optional HTTP(S) health-check path for TCP_ROUTE_N
 #  PROXY_PROTOCOL=true           Forward PROXY protocol v2 header to backends
 #                                  so that upstream services see the real client IP
 #  STATS_ENABLED=true            Enable HAProxy built-in stats web UI (default: false)
@@ -31,7 +38,9 @@ STATS_PASSWORD="${STATS_PASSWORD:-}"
 # Helpers
 # --------------------------------------------------------------------------
 server_opts() {
-  [ "$PROXY_PROTO" = "true" ] && echo "send-proxy-v2" || echo ""
+  local opts="check inter 2s fall 3 rise 2"
+  [ "$PROXY_PROTO" = "true" ] && opts="$opts send-proxy-v2"
+  echo "$opts"
 }
 
 # --------------------------------------------------------------------------
@@ -81,10 +90,22 @@ while true; do
   SNI_ACL_LINES="${SNI_ACL_LINES}
 ${acl}"
 
-  SNI_BACKEND_BLOCKS="${SNI_BACKEND_BLOCKS}
+  # Check for optional HTTPS health-check path
+  eval "health_path=\${SNI_HEALTH_${i}:-}"
+  if [ -n "$health_path" ]; then
+    opts="${opts} ssl verify none"
+    SNI_BACKEND_BLOCKS="${SNI_BACKEND_BLOCKS}
+backend ${name}
+  option httpchk
+  http-check send meth GET uri ${health_path} ver HTTP/1.1 hdr Host ${hostname}
+  server s1 ${ip}:${port} ${opts}
+"
+  else
+    SNI_BACKEND_BLOCKS="${SNI_BACKEND_BLOCKS}
 backend ${name}
   server s1 ${ip}:${port} ${opts}
 "
+  fi
 
   i=$((i + 1))
 done
@@ -110,7 +131,22 @@ while true; do
     exit 1
   fi
 
-  TCP_BLOCKS="${TCP_BLOCKS}
+  # Check for optional health-check path
+  eval "health_path=\${TCP_HEALTH_${j}:-}"
+  if [ -n "$health_path" ]; then
+    opts="${opts} ssl verify none"
+    TCP_BLOCKS="${TCP_BLOCKS}
+frontend tcp_frontend_${j}
+  bind *:${lport}
+  default_backend ${name}
+
+backend ${name}
+  option httpchk
+  http-check send meth GET uri ${health_path} ver HTTP/1.1 hdr Host localhost
+  server s1 ${ip}:${dport} ${opts}
+"
+  else
+    TCP_BLOCKS="${TCP_BLOCKS}
 frontend tcp_frontend_${j}
   bind *:${lport}
   default_backend ${name}
@@ -118,6 +154,7 @@ frontend tcp_frontend_${j}
 backend ${name}
   server s1 ${ip}:${dport} ${opts}
 "
+  fi
 
   j=$((j + 1))
 done
@@ -140,6 +177,19 @@ fi
 # --------------------------------------------------------------------------
 DEFAULT_OPTS="$(server_opts)"
 
+# Build default backend block (with optional HTTPS health check)
+SNI_DEFAULT_HEALTH_PATH="${SNI_DEFAULT_HEALTH:-}"
+if [ -n "$SNI_DEFAULT_HEALTH_PATH" ]; then
+  DEFAULT_OPTS="${DEFAULT_OPTS} ssl verify none"
+  DEFAULT_BACKEND_BLOCK="backend sni_default
+  option httpchk
+  http-check send meth GET uri ${SNI_DEFAULT_HEALTH_PATH} ver HTTP/1.1 hdr Host localhost
+  server s1 ${SNI_DEFAULT_IP}:${SNI_DEFAULT_PORT} ${DEFAULT_OPTS}"
+else
+  DEFAULT_BACKEND_BLOCK="backend sni_default
+  server s1 ${SNI_DEFAULT_IP}:${SNI_DEFAULT_PORT} ${DEFAULT_OPTS}"
+fi
+
 cat > "$CFG" <<HAPROXY_CFG
 global
   log stdout format raw local0 info
@@ -152,6 +202,9 @@ defaults
   timeout connect 5s
   timeout client 300s
   timeout server 300s
+  option redispatch
+  retry-on conn-failure empty-response response-timeout
+  retries 3
 
 frontend sni_tls
   bind *:${LISTEN_PORT}
@@ -160,8 +213,7 @@ frontend sni_tls
 ${SNI_ACL_LINES}
   default_backend sni_default
 
-backend sni_default
-  server s1 ${SNI_DEFAULT_IP}:${SNI_DEFAULT_PORT} ${DEFAULT_OPTS}
+${DEFAULT_BACKEND_BLOCK}
 ${SNI_BACKEND_BLOCKS}${TCP_BLOCKS}${STATS_BLOCK}
 HAPROXY_CFG
 
