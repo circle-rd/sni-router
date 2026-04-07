@@ -70,7 +70,13 @@ SNI_DEFAULT_PORT="$(echo "$SNI_DEFAULT" | cut -d: -f2)"
 # --------------------------------------------------------------------------
 # Build use_backend ACL lines and backend blocks for SNI_ROUTE_N vars
 # --------------------------------------------------------------------------
-SNI_ACL_LINES=""
+# Exact and wildcard ACL rules are kept in separate buckets so that exact
+# matches are always emitted first in the frontend, regardless of the order
+# routes are declared.  HAProxy uses first-match semantics, so without this
+# a wildcard (*.example.com) defined before a specific rule
+# (sub.example.com) would shadow the specific one.
+SNI_ACL_EXACT=""
+SNI_ACL_WILDCARD=""
 SNI_BACKEND_BLOCKS=""
 i=1
 
@@ -91,20 +97,16 @@ while true; do
 
   # Wildcard: *.example.com  →  req.ssl_sni ends with .example.com
   case "$hostname" in
-    \*.*)
+    \*.*)  
       suffix="${hostname#\*}"   # strip leading '*' → .example.com
-      acl="  use_backend ${name} if { req.ssl_sni -m end ${suffix} }"
+      SNI_ACL_WILDCARD="${SNI_ACL_WILDCARD}
+  use_backend ${name} if { req.ssl_sni -m end ${suffix} }"
       ;;
     *)
-      acl="  use_backend ${name} if { req.ssl_sni -i ${hostname} }"
+      SNI_ACL_EXACT="${SNI_ACL_EXACT}
+  use_backend ${name} if { req.ssl_sni -i ${hostname} }"
       ;;
   esac
-
-  SNI_ACL_LINES="${SNI_ACL_LINES}
-${acl}"
-
-  # Check for optional HTTPS health-check path
-  eval "health_path=\${SNI_HEALTH_${i}:-}"
   if [ -n "$health_path" ]; then
     opts="${opts} ssl verify none"
     SNI_BACKEND_BLOCKS="${SNI_BACKEND_BLOCKS}
@@ -146,18 +148,14 @@ if [ -n "${SNI_ROUTES:-}" ]; then
     case "$hostname" in
       \*.*)
         suffix="${hostname#\*}"
-        acl="  use_backend ${name} if { req.ssl_sni -m end ${suffix} }"
+        SNI_ACL_WILDCARD="${SNI_ACL_WILDCARD}
+  use_backend ${name} if { req.ssl_sni -m end ${suffix} }"
         ;;
       *)
-        acl="  use_backend ${name} if { req.ssl_sni -i ${hostname} }"
+        SNI_ACL_EXACT="${SNI_ACL_EXACT}
+  use_backend ${name} if { req.ssl_sni -i ${hostname} }"
         ;;
     esac
-
-    SNI_ACL_LINES="${SNI_ACL_LINES}
-${acl}"
-
-    # Health check: derive var name from hostname (dots, hyphens, asterisks → underscores)
-    norm_name="$(echo "$hostname" | tr '.*-' '___')"
     eval "health_path=\${SNI_HEALTH_${norm_name}:-}"
     if [ -n "$health_path" ]; then
       opts="${opts} ssl verify none"
@@ -348,7 +346,8 @@ frontend sni_tls
   bind *:${LISTEN_PORT}
   tcp-request inspect-delay 5s
   tcp-request content accept if { req.ssl_hello_type 1 }
-${SNI_ACL_LINES}
+${SNI_ACL_EXACT}
+${SNI_ACL_WILDCARD}
   default_backend sni_default
 
 ${DEFAULT_BACKEND_BLOCK}
