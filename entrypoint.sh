@@ -18,6 +18,19 @@
 #  SNI_DEFAULT_HEALTH=/path      Optional HTTPS health-check path for SNI_DEFAULT
 #  TCP_ROUTE_N=lport:ip:dport    Plain TCP port-based routing rules, N = 1, 2, 3 …
 #  TCP_HEALTH_N=/path            Optional HTTP(S) health-check path for TCP_ROUTE_N
+#  SNI_ROUTES=<multiline>        Alternative to SNI_ROUTE_N: one hostname:ip:port per line.
+#                                  Lines starting with # and blank lines are ignored.
+#                                  Processed after SNI_ROUTE_N rules. Useful with Docker
+#                                  Compose block-scalar YAML (|).
+#  SNI_HEALTH_<norm>=<path>      HTTPS health-check path for an SNI_ROUTES entry.
+#                                  <norm> is the hostname with ., *, - replaced by _.
+#                                  Example: SNI_HEALTH_docs_example_com=/health
+#  SNI_HTTP_REDIRECT=true        Create an HTTP frontend on SNI_HTTP_PORT (default: 80).
+#                                  Unmatched requests are 301-redirected to HTTPS.
+#                                  Enables Let's Encrypt http-01 challenge forwarding.
+#  SNI_HTTP_PORT=80              Port for the HTTP frontend (default: 80)
+#  HTTP_ROUTE_N=hostname:ip:p    HTTP routing rules for the HTTP frontend, N = 1, 2, 3 …
+#  HTTP_ROUTES=<multiline>       Alternative to HTTP_ROUTE_N: one hostname:ip:port per line.
 #  PROXY_PROTOCOL=true           Forward PROXY protocol v2 header to backends
 #                                  so that upstream services see the real client IP
 #  STATS_ENABLED=true            Enable HAProxy built-in stats web UI (default: false)
@@ -111,6 +124,63 @@ backend ${name}
 done
 
 # --------------------------------------------------------------------------
+# Build use_backend ACL lines and backend blocks for SNI_ROUTES multiline var
+# --------------------------------------------------------------------------
+if [ -n "${SNI_ROUTES:-}" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+
+    hostname="$(echo "$line" | cut -d: -f1)"
+    ip="$(echo "$line"       | cut -d: -f2)"
+    port="$(echo "$line"     | cut -d: -f3)"
+    name="sni_backend_${i}"
+    opts="$(server_opts)"
+
+    if [ -z "$hostname" ] || [ -z "$ip" ] || [ -z "$port" ]; then
+      echo "[sni-router] ERROR: SNI_ROUTES entry '${line}' must follow hostname:ip:port format." >&2
+      exit 1
+    fi
+
+    case "$hostname" in
+      \*.*)
+        suffix="${hostname#\*}"
+        acl="  use_backend ${name} if { req.ssl_sni -m end ${suffix} }"
+        ;;
+      *)
+        acl="  use_backend ${name} if { req.ssl_sni -i ${hostname} }"
+        ;;
+    esac
+
+    SNI_ACL_LINES="${SNI_ACL_LINES}
+${acl}"
+
+    # Health check: derive var name from hostname (dots, hyphens, asterisks → underscores)
+    norm_name="$(echo "$hostname" | tr '.*-' '___')"
+    eval "health_path=\${SNI_HEALTH_${norm_name}:-}"
+    if [ -n "$health_path" ]; then
+      opts="${opts} ssl verify none"
+      SNI_BACKEND_BLOCKS="${SNI_BACKEND_BLOCKS}
+backend ${name}
+  option httpchk
+  http-check send meth GET uri ${health_path} ver HTTP/1.1 hdr Host ${hostname}
+  server s1 ${ip}:${port} ${opts}
+"
+    else
+      SNI_BACKEND_BLOCKS="${SNI_BACKEND_BLOCKS}
+backend ${name}
+  server s1 ${ip}:${port} ${opts}
+"
+    fi
+
+    i=$((i + 1))
+  done <<SNI_ROUTES_EOF
+${SNI_ROUTES}
+SNI_ROUTES_EOF
+fi
+
+# --------------------------------------------------------------------------
 # Build frontend + backend blocks for TCP_ROUTE_N vars (plain TCP, no TLS)
 # --------------------------------------------------------------------------
 TCP_BLOCKS=""
@@ -158,6 +228,74 @@ backend ${name}
 
   j=$((j + 1))
 done
+
+# --------------------------------------------------------------------------
+# Build frontend + backend blocks for HTTP routing / Let's Encrypt http-01
+# --------------------------------------------------------------------------
+HTTP_ACL_LINES=""
+HTTP_BACKEND_BLOCKS=""
+HTTP_LISTEN_PORT="${SNI_HTTP_PORT:-80}"
+k=1
+
+while true; do
+  eval "val=\${HTTP_ROUTE_${k}:-}"
+  [ -z "$val" ] && break
+
+  hostname="$(echo "$val" | cut -d: -f1)"
+  ip="$(echo "$val"       | cut -d: -f2)"
+  port="$(echo "$val"     | cut -d: -f3)"
+  name="http_backend_${k}"
+
+  if [ -z "$hostname" ] || [ -z "$ip" ] || [ -z "$port" ]; then
+    echo "[sni-router] ERROR: HTTP_ROUTE_${k}='${val}' must follow hostname:ip:port format." >&2
+    exit 1
+  fi
+
+  HTTP_ACL_LINES="${HTTP_ACL_LINES}
+  use_backend ${name} if { hdr_dom(host) -i ${hostname} }"
+
+  HTTP_BACKEND_BLOCKS="${HTTP_BACKEND_BLOCKS}
+backend ${name}
+  mode http
+  server s1 ${ip}:${port} check inter 2s fall 3 rise 2
+"
+  k=$((k + 1))
+done
+
+if [ -n "${HTTP_ROUTES:-}" ]; then
+  while IFS= read -r line; do
+    case "$line" in
+      ''|\#*) continue ;;
+    esac
+
+    hostname="$(echo "$line" | cut -d: -f1)"
+    ip="$(echo "$line"       | cut -d: -f2)"
+    port="$(echo "$line"     | cut -d: -f3)"
+    name="http_backend_${k}"
+
+    if [ -z "$hostname" ] || [ -z "$ip" ] || [ -z "$port" ]; then
+      echo "[sni-router] ERROR: HTTP_ROUTES entry '${line}' must follow hostname:ip:port format." >&2
+      exit 1
+    fi
+
+    HTTP_ACL_LINES="${HTTP_ACL_LINES}
+  use_backend ${name} if { hdr_dom(host) -i ${hostname} }"
+
+    HTTP_BACKEND_BLOCKS="${HTTP_BACKEND_BLOCKS}
+backend ${name}
+  mode http
+  server s1 ${ip}:${port} check inter 2s fall 3 rise 2
+"
+    k=$((k + 1))
+  done <<HTTP_ROUTES_EOF
+${HTTP_ROUTES}
+HTTP_ROUTES_EOF
+fi
+
+HTTP_BLOCK=""
+if [ "${SNI_HTTP_REDIRECT:-false}" = "true" ] || [ -n "$HTTP_ACL_LINES" ]; then
+  HTTP_BLOCK="$(printf '\nfrontend http_frontend\n  bind *:%s\n  mode http\n  option httplog\n  option forwardfor\n%s\n  redirect scheme https code 301\n%s' "${HTTP_LISTEN_PORT}" "${HTTP_ACL_LINES}" "${HTTP_BACKEND_BLOCKS}")"
+fi
 
 # --------------------------------------------------------------------------
 # Build stats block (optional)
@@ -214,7 +352,7 @@ ${SNI_ACL_LINES}
   default_backend sni_default
 
 ${DEFAULT_BACKEND_BLOCK}
-${SNI_BACKEND_BLOCKS}${TCP_BLOCKS}${STATS_BLOCK}
+${SNI_BACKEND_BLOCKS}${TCP_BLOCKS}${HTTP_BLOCK}${STATS_BLOCK}
 HAPROXY_CFG
 
 # --------------------------------------------------------------------------

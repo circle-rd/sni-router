@@ -70,11 +70,12 @@ docker compose up -d
 
 ### TLS / SNI routing
 
-| Variable          | Required     | Default | Description                                         |
-| ----------------- | ------------ | ------- | --------------------------------------------------- |
-| `SNI_LISTEN_PORT` | No           | `443`   | Port HAProxy listens on for TLS traffic             |
-| `SNI_ROUTE_N`     | At least one | —       | Routing rule: `hostname:backend_ip:backend_port`    |
-| `SNI_DEFAULT`     | **Yes**      | —       | Default backend when no SNI rule matches: `ip:port` |
+| Variable          | Required     | Default | Description                                                                                                                                                                                         |
+| ----------------- | ------------ | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SNI_LISTEN_PORT` | No           | `443`   | Port HAProxy listens on for TLS traffic                                                                                                                                                             |
+| `SNI_ROUTE_N`     | At least one | —       | Routing rule: `hostname:backend_ip:backend_port`                                                                                                                                                    |
+| `SNI_ROUTES`      | No           | —       | Multiline alternative to `SNI_ROUTE_N` (one `hostname:ip:port` per line, `#` comments and blank lines ignored). Useful with Docker Compose block-scalar YAML (`\|`). Processed after `SNI_ROUTE_N`. |
+| `SNI_DEFAULT`     | **Yes**      | —       | Default backend when no SNI rule matches: `ip:port`                                                                                                                                                 |
 
 `N` must be consecutive integers starting at `1` (`SNI_ROUTE_1`, `SNI_ROUTE_2`, …).
 
@@ -90,6 +91,33 @@ Each `TCP_ROUTE_N` creates a dedicated HAProxy frontend on `listen_port`. No SNI
 
 > Remember to expose each `listen_port` in your `docker-compose.yml` `ports:` section.
 
+### HTTP routing / Let's Encrypt http-01 challenges
+
+The HTTP frontend forwards plain HTTP requests to specific backends — useful for routing **Let's Encrypt http-01 ACME challenges** to the correct reverse proxy. All unmatched requests are **301-redirected to HTTPS**.
+
+| Variable            | Required | Default | Description                                                           |
+| ------------------- | -------- | ------- | --------------------------------------------------------------------- |
+| `SNI_HTTP_REDIRECT` | No       | `false` | Enable the HTTP frontend (`true`/`false`)                             |
+| `SNI_HTTP_PORT`     | No       | `80`    | Port for the HTTP frontend                                            |
+| `HTTP_ROUTE_N`      | No       | —       | HTTP routing rule: `hostname:backend_ip:backend_port`                 |
+| `HTTP_ROUTES`       | No       | —       | Multiline alternative to `HTTP_ROUTE_N` (same format as `SNI_ROUTES`) |
+
+The HTTP frontend is activated if `SNI_HTTP_REDIRECT=true` or if any `HTTP_ROUTE_N`/`HTTP_ROUTES` entry is defined.
+
+> Remember to expose port `80` (or `SNI_HTTP_PORT`) in your `docker-compose.yml` `ports:` section.
+
+**Example — http-01 challenge forwarding:**
+
+```yaml
+environment:
+  SNI_HTTP_REDIRECT: "true"
+  # Forward http-01 challenges for these hosts to the matching Traefik instance.
+  # Everything else gets redirected to HTTPS.
+  HTTP_ROUTES: |
+    app1.example.com:192.168.1.10:80
+    app2.example.com:192.168.1.20:80
+```
+
 ### PROXY protocol
 
 | Variable         | Required | Default | Description                                                    |
@@ -104,11 +132,12 @@ By default every backend is **TCP-checked** every 2 seconds (`check inter 2s fal
 
 For deeper **application-level** verification you can point HAProxy at an HTTPS health-check endpoint per backend. HAProxy will open its own TLS connection (without certificate verification) and send an HTTP `GET` request.
 
-| Variable             | Required | Default | Description                                                |
-| -------------------- | -------- | ------- | ---------------------------------------------------------- |
-| `SNI_HEALTH_N`       | No       | _(TCP)_ | HTTPS health-check path for `SNI_ROUTE_N` (e.g. `/health`) |
-| `SNI_DEFAULT_HEALTH` | No       | _(TCP)_ | HTTPS health-check path for the `SNI_DEFAULT` backend      |
-| `TCP_HEALTH_N`       | No       | _(TCP)_ | HTTPS health-check path for `TCP_ROUTE_N` (e.g. `/health`) |
+| Variable             | Required | Default | Description                                                                                                                                                 |
+| -------------------- | -------- | ------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `SNI_HEALTH_N`       | No       | _(TCP)_ | HTTPS health-check path for `SNI_ROUTE_N` (e.g. `/health`)                                                                                                  |
+| `SNI_HEALTH_<norm>`  | No       | _(TCP)_ | HTTPS health-check path for an `SNI_ROUTES` entry. `<norm>` is the hostname with `.`, `*`, `-` replaced by `_` (e.g. `SNI_HEALTH_app1_example_com=/health`) |
+| `SNI_DEFAULT_HEALTH` | No       | _(TCP)_ | HTTPS health-check path for the `SNI_DEFAULT` backend                                                                                                       |
+| `TCP_HEALTH_N`       | No       | _(TCP)_ | HTTPS health-check path for `TCP_ROUTE_N` (e.g. `/health`)                                                                                                  |
 
 When a `*_HEALTH_*` variable is **not set**, the corresponding backend keeps a plain TCP connect check.
 
@@ -228,10 +257,11 @@ Docker will automatically pull the correct variant for your host.
 ## How it works
 
 1. The container starts and `entrypoint.sh` runs before HAProxy.
-2. The script reads `SNI_ROUTE_N` and `TCP_ROUTE_N` variables, generates a valid `haproxy.cfg`, and runs `haproxy -c -f` to validate it.
+2. The script reads `SNI_ROUTE_N`, `SNI_ROUTES`, `TCP_ROUTE_N`, `HTTP_ROUTE_N` and `HTTP_ROUTES` variables, generates a valid `haproxy.cfg`, and runs `haproxy -c -f` to validate it.
 3. If validation passes, HAProxy starts. If not, the container exits immediately with an error.
 4. For TLS connections, HAProxy reads **only the TLS ClientHello** (the SNI field) without decrypting anything, then forwards the raw TCP byte stream to the matching backend.
 5. For plain TCP routes, HAProxy forwards by listen port without any inspection.
+6. If `SNI_HTTP_REDIRECT=true` or HTTP routes are defined, a separate HTTP-mode frontend on port 80 handles plain HTTP — routing known hosts to their backend (e.g. for Let's Encrypt http-01 challenges) and redirecting everything else to HTTPS.
 
 ---
 

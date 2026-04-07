@@ -7,6 +7,7 @@ services:
     # Add one entry per distinct listen port you define below.
     ports:
       - "443:443"        # SNI_LISTEN_PORT — TLS passthrough
+      - "80:80"          # SNI_HTTP_PORT   — HTTP redirect / http-01 challenges
       # - "5432:5432"    # Example: TCP_ROUTE_1 (PostgreSQL)
       # - "1883:1883"    # Example: TCP_ROUTE_2 (MQTT)
       # Stats UI — bind to local network interface only (never expose to internet)
@@ -26,6 +27,14 @@ services:
       SNI_ROUTE_2: "app2.example.com:192.168.1.20:443"
       SNI_ROUTE_3: "*.staging.example.com:192.168.1.30:443"
 
+      # Alternatively, use a multiline block scalar (more readable for many routes).
+      # SNI_ROUTES and SNI_ROUTE_N can be combined — SNI_ROUTE_N is processed first.
+      # SNI_ROUTES: |
+      #   app1.example.com:192.168.1.10:443
+      #   app2.example.com:192.168.1.20:443
+      #   # Wildcard rule — matches any subdomain not listed above
+      #   *.example.com:192.168.1.30:443
+
       # Optional HTTPS health-check paths per SNI route.
       # When set, HAProxy sends an HTTPS GET to that path (TLS, no cert
       # verification) instead of a plain TCP connect check.
@@ -35,6 +44,19 @@ services:
       # Catch-all when no SNI rule matches.
       SNI_DEFAULT: "192.168.1.10:443"
       # SNI_DEFAULT_HEALTH: "/health"
+
+      # ---------------------------------------------------------------
+      # HTTP frontend — port 80 redirect + http-01 ACME challenge
+      # forwarding. Set SNI_HTTP_REDIRECT=true to enable.
+      # Unmatched requests are 301-redirected to HTTPS.
+      # HTTP_ROUTE_N and HTTP_ROUTES follow the same format as SNI routes.
+      # ---------------------------------------------------------------
+      # SNI_HTTP_REDIRECT: "true"
+      # SNI_HTTP_PORT: "80"
+      # HTTP_ROUTES: |
+      #   app1.example.com:192.168.1.10:80
+      #   app2.example.com:192.168.1.20:80
+      # HTTP_ROUTE_1: "app1.example.com:192.168.1.10:80"
 
       # ---------------------------------------------------------------
       # Plain TCP routing — each rule gets its own listen port.
