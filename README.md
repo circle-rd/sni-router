@@ -81,6 +81,16 @@ docker compose up -d
 
 **Wildcard hostnames** are supported: `*.example.com` will match any subdomain of `example.com`.
 
+**Automatic priority sorting** — exact hostnames always take precedence over wildcards, regardless of the order they are declared. sni-router collects all exact rules and all wildcard rules into separate buckets, then emits exact matches first in the generated HAProxy config. HAProxy uses first-match semantics, so a specific rule for `docs.example.com` will never be shadowed by a broader `*.example.com` rule even if the wildcard is declared first.
+
+```yaml
+# All three declarations below produce the same routing — declaration order does not matter.
+SNI_ROUTES: |
+  *.example.com:192.168.1.10:443    # wildcard declared first — still evaluated last
+  docs.example.com:192.168.1.20:443 # exact rule — always evaluated first
+  api.example.com:192.168.1.30:443  # exact rule — always evaluated first
+```
+
 ### Plain TCP routing (no TLS)
 
 | Variable      | Required | Default | Description                                            |
@@ -153,15 +163,40 @@ environment:
   SNI_DEFAULT_HEALTH: "/health"
 ```
 
-**Example — Traefik:**
+**Example — Traefik (Docker Compose CLI args):**
+
+Both `proxyProtocol` and `forwardedHeaders` must trust the sni-router's IP so Traefik strips the PROXY header before performing TLS (without this, Traefik receives non-TLS bytes first and the connection fails with `SSL_ERROR_RX_RECORD_TOO_LONG`).
 
 ```yaml
-# traefik static config
+# docker-compose.yml — Traefik service
+command:
+  - --entrypoints.websecure.address=:443
+  - --entrypoints.websecure.proxyProtocol.trustedIPs=10.0.0.0/24 # sni-router network
+  - --entrypoints.websecure.forwardedHeaders.trustedIPs=10.0.0.0/24
+  - --entrypoints.web.address=:80
+  - --entrypoints.web.proxyProtocol.trustedIPs=10.0.0.0/24
+  - --entrypoints.web.forwardedHeaders.trustedIPs=10.0.0.0/24
+```
+
+**Example — Traefik (static YAML config):**
+
+```yaml
+# traefik.yml
 entryPoints:
   websecure:
     proxyProtocol:
       trustedIPs:
-        - "192.168.1.5" # IP of the sni-router container
+        - "10.0.0.1" # sni-router host IP
+    forwardedHeaders:
+      trustedIPs:
+        - "10.0.0.1"
+  web:
+    proxyProtocol:
+      trustedIPs:
+        - "10.0.0.1"
+    forwardedHeaders:
+      trustedIPs:
+        - "10.0.0.1"
 ```
 
 **Example — nginx:**
@@ -169,7 +204,7 @@ entryPoints:
 ```nginx
 server {
     listen 443 ssl proxy_protocol;
-    set_real_ip_from 192.168.1.5;
+    set_real_ip_from 10.0.0.1;   # sni-router host IP
     real_ip_header proxy_protocol;
 }
 ```
@@ -203,11 +238,13 @@ services:
     environment:
       SNI_LISTEN_PORT: "443"
 
-      SNI_ROUTE_1: "project1.example.com:192.168.1.10:443"
-      SNI_ROUTE_2: "project2.example.com:192.168.1.20:443"
-      SNI_ROUTE_3: "*.staging.example.com:192.168.1.30:443"
+      # Declaration order does not matter — exact hostnames are always
+      # matched before wildcards regardless of how they are listed.
+      SNI_ROUTES: |
+        project1.example.com:192.168.1.10:443
+        project2.example.com:192.168.1.20:443
+        *.staging.example.com:192.168.1.30:443
       SNI_DEFAULT: "192.168.1.10:443"
-
       PROXY_PROTOCOL: "true"
 
       STATS_ENABLED: "true"
@@ -257,7 +294,7 @@ Docker will automatically pull the correct variant for your host.
 ## How it works
 
 1. The container starts and `entrypoint.sh` runs before HAProxy.
-2. The script reads `SNI_ROUTE_N`, `SNI_ROUTES`, `TCP_ROUTE_N`, `HTTP_ROUTE_N` and `HTTP_ROUTES` variables, generates a valid `haproxy.cfg`, and runs `haproxy -c -f` to validate it.
+2. The script reads `SNI_ROUTE_N`, `SNI_ROUTES`, `TCP_ROUTE_N`, `HTTP_ROUTE_N` and `HTTP_ROUTES` variables and generates a valid `haproxy.cfg`. SNI rules are sorted automatically — all exact hostnames are emitted first in the HAProxy frontend, followed by all wildcards — so declaration order never affects routing priority. The config is then validated with `haproxy -c -f`.
 3. If validation passes, HAProxy starts. If not, the container exits immediately with an error.
 4. For TLS connections, HAProxy reads **only the TLS ClientHello** (the SNI field) without decrypting anything, then forwards the raw TCP byte stream to the matching backend.
 5. For plain TCP routes, HAProxy forwards by listen port without any inspection.
