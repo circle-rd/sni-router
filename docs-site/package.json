@@ -1,0 +1,17 @@
+{
+    "name": "sni-router-docs",
+    "version": "1.0.0",
+    "private": true,
+    "description": "TLS/SNI passthrough router built on HAProxy — route HTTPS traffic by hostname without decrypting.",
+    "scripts": {
+        "dev": "nuxt dev",
+        "build": "nuxt build",
+        "generate": "nuxt generate",
+        "preview": "nuxt preview"
+    },
+    "dependencies": {
+        "docus": "latest",
+        "nuxt": "^4.0.0",
+        "better-sqlite3": "^12.2.0"
+    }
+}
