@@ -4,7 +4,7 @@ seo:
   description: TLS/SNI passthrough router built on HAProxy — route HTTPS traffic by hostname without decrypting.
 ---
 
-:::u-page-hero
+:::u-page-hero{.circle-hero}
 #title
 Route TLS traffic by hostname — without decrypting.
 
@@ -21,7 +21,7 @@ Star on GitHub
 ::::
 :::
 
-:::u-page-section
+:::u-page-section{.circle-section}
 #title
 Why SNI Router?
 
